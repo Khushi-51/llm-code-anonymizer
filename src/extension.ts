@@ -1,75 +1,130 @@
 import * as vscode from 'vscode';
 
 export function activate(context: vscode.ExtensionContext) {
+
+  // Command to anonymize the selected code
   let disposable = vscode.commands.registerCommand('code-anonymizer.askGpt', () => {
-    // Check if there’s an active editor
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
       vscode.window.showInformationMessage('No file is open!');
       return;
     }
 
-    // Get the selected code
     const selection = editor.selection;
     const selectedText = editor.document.getText(selection);
 
-    // If no code is selected, show an error
     if (!selectedText.trim()) {
       vscode.window.showErrorMessage('Please select some code first!');
       return;
     }
 
-    // Step 1: Remove comments
+    // --- Helper Functions ---
+
     function removeComments(code: string): string {
       return code
         .replace(/\/\/.*$/gm, '') // Remove single-line comments
         .replace(/\/\*[\s\S]*?\*\//g, ''); // Remove multi-line comments
     }
 
-    // Step 2: Rename variables, functions, and classes to generic names
-    function anonymizeIdentifiers(code: string): string {
+    function anonymizeIdentifiers(code: string): { anonymized: string; mapping: Record<string, string> } {
       const usedNames = new Set<string>();
       const nameMap: Record<string, string> = {};
+      const reverseMap: Record<string, string> = {};
 
-      return code.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, (match) => {
-        // Skip JavaScript keywords
-        if (['function', 'if', 'else', 'return', 'for', 'while', 'let', 'const', 'var', 'class', 'new', 'this', 'true', 'false', 'null', 'undefined'].includes(match.toLowerCase())) {
+      // List of common keywords to ignore
+      const keywords = new Set([
+        'function', 'if', 'else', 'return', 'for', 'while', 'let', 'const', 'var', 
+        'class', 'new', 'this', 'true', 'false', 'null', 'undefined', 'import', 
+        'export', 'from', 'await', 'async', 'try', 'catch', 'finally', 'switch', 
+        'case', 'default', 'break', 'continue', 'do', 'instanceof', 'typeof'
+      ]);
+
+      const anonymizedCode = code.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, (match) => {
+        if (keywords.has(match.toLowerCase())) {
           return match;
         }
 
-        // Assign a new generic name if not mapped yet
         if (!nameMap[match]) {
-          let newName = 'var1'; // Start with var1
-          let counter = 1;
-          while (usedNames.has(newName)) {
-            counter++;
+          let newName;
+          let counter = Object.keys(nameMap).length + 1;
+          do {
             newName = `var${counter}`;
-          }
+            counter++;
+          } while (usedNames.has(newName));
+          
           usedNames.add(newName);
           nameMap[match] = newName;
+          reverseMap[newName] = match;
         }
 
         return nameMap[match];
       });
+
+      return { anonymized: anonymizedCode, mapping: reverseMap };
     }
 
-    // Step 3: Mock LLM response
-    function mockLLMResponse(code: string): string {
-      // Simple mock: adds a suggestion to optimize by adding a constant
-      return `// Suggestion: Use a constant for better readability\n${code.replace('var1', 'function optimizedVar1')}`;
-    }
+    // --- Main Logic ---
 
-    // Apply the stripping
     const strippedCode = removeComments(selectedText);
-    const anonymizedCode = anonymizeIdentifiers(strippedCode);
-    const llmSuggestion = mockLLMResponse(anonymizedCode);
+    const { anonymized: anonymizedCode, mapping } = anonymizeIdentifiers(strippedCode);
 
-    // Show the result
-    vscode.window.showInformationMessage('🔐 LLM Suggestion: ' + llmSuggestion.substring(0, 50) + '...');
-    console.log('LLM Suggestion:', llmSuggestion);
+    // Store mapping in global state to be used by the revert command
+    context.globalState.update('codeAnonymizerMapping', mapping);
+
+    // Show a confirmation message to the user
+    vscode.window.showInformationMessage(
+        '🔐 Code Anonymized & Ready for AI. Mapping Saved.', 
+        { modal: true, detail: `Your code has been anonymized. You can now copy it from the output channel and use it with any AI tool.` }
+    );
+    
+    // **MODIFIED PART:** Output ONLY the anonymized code for easy copying.
+    const outputChannel = vscode.window.createOutputChannel("Anonymized Code");
+    outputChannel.clear();
+    outputChannel.append(anonymizedCode); // Only append the code itself
+    outputChannel.show();
   });
 
-  context.subscriptions.push(disposable);
+  // Command to revert the anonymized code back to the original
+  let revertDisposable = vscode.commands.registerCommand('code-anonymizer.revertToOriginal', () => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showInformationMessage('No file is open!');
+      return;
+    }
+
+    const selection = editor.selection;
+    const selectedText = editor.document.getText(selection);
+
+    if (!selectedText.trim()) {
+      vscode.window.showErrorMessage('Please select the AI-updated code first!');
+      return;
+    }
+
+    // Retrieve the saved mapping
+    const mapping = context.globalState.get<Record<string, string>>('codeAnonymizerMapping');
+    if (!mapping) {
+      vscode.window.showWarningMessage('No mapping available! Run "Anonymize Code" first.');
+      return;
+    }
+
+    // Revert the code using the mapping
+    let revertedCode = selectedText;
+    for (const [anonymized, original] of Object.entries(mapping)) {
+      // Use a regex with word boundary to replace whole words only
+      const regex = new RegExp(`\\b${anonymized}\\b`, 'g');
+      revertedCode = revertedCode.replace(regex, original);
+    }
+
+    // Replace the selected text with the reverted code
+    editor.edit(editBuilder => {
+      editBuilder.replace(selection, revertedCode);
+    });
+
+    vscode.window.showInformationMessage('✅ Code reverted to original names!');
+  });
+
+  context.subscriptions.push(disposable, revertDisposable);
 }
 
+// This method is called when your extension is deactivated
 export function deactivate() {}
